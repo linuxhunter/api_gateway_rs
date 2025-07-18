@@ -28,8 +28,10 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 # Configuration
-config = "0.13"
+config = { version = "0.13", features = ["yaml", "json", "toml"] }
 notify = "5.1"
+serde_yaml = "0.9"
+toml = "0.7"
 
 # Utilities
 bytes = "1.4"

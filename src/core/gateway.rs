@@ -1,7 +1,10 @@
+use std::sync::Arc;
+
 use async_trait::async_trait;
 
 use crate::core::request::GatewayRequest;
 use crate::core::response::GatewayResponse;
+use crate::core::router::Router;
 use crate::error::GatewayError;
 
 /// Core API Gateway trait that defines the main functionality
@@ -23,10 +26,83 @@ pub trait Gateway: Send + Sync {
     async fn health_check(&self) -> bool;
 }
 
+/// Handler for processing requests
+struct RequestHandler {
+    router: Box<dyn Router + Send + Sync>,
+}
+
+impl RequestHandler {
+    /// Create a new request handler
+    fn new(router: Box<dyn Router + Send + Sync>) -> Self {
+        Self { router }
+    }
+
+    /// Process a request
+    async fn process_request(
+        &self,
+        request: GatewayRequest,
+    ) -> Result<GatewayResponse, GatewayError> {
+        // Find a matching route
+        let route_match = self.router.find_route(&request).await?;
+
+        // Log the matched route
+        tracing::info!(
+            "Route matched: {} {} -> {}",
+            request.method,
+            request.uri.path(),
+            route_match.route.path
+        );
+
+        // Extract route parameters if any
+        if !route_match.params.is_empty() {
+            let params = route_match
+                .params
+                .iter()
+                .map(|p| format!("{}={}", p.name, p.value))
+                .collect::<Vec<_>>()
+                .join(", ");
+
+            tracing::debug!("Route parameters: {}", params);
+        }
+
+        // For now, just return a simple response
+        // In future tasks, we'll implement backend forwarding
+        let mut headers = hyper::HeaderMap::new();
+        headers.insert(
+            hyper::header::CONTENT_TYPE,
+            "application/json".parse().unwrap(),
+        );
+
+        let body = format!(
+            r#"{{
+                "message": "Route matched successfully",
+                "path": "{}",
+                "method": "{}",
+                "backends": {:?},
+                "params": {:?}
+            }}"#,
+            route_match.route.path,
+            request.method,
+            route_match.route.backends,
+            route_match
+                .params
+                .iter()
+                .map(|p| format!("{}={}", p.name, p.value))
+                .collect::<Vec<_>>()
+        );
+
+        Ok(GatewayResponse::new(
+            hyper::StatusCode::OK,
+            headers,
+            bytes::Bytes::from(body),
+        ))
+    }
+}
+
 /// Basic implementation of the API Gateway
 pub struct ApiGateway {
     /// Router for request routing
-    router: Option<Box<dyn crate::core::router::Router>>,
+    router: Option<Box<dyn Router + Send + Sync>>,
     /// Server configuration
     config: crate::config::ServerConfig,
     /// Server state (handle and shutdown sender)
@@ -67,7 +143,7 @@ impl ApiGateway {
     }
 
     /// Set the router for this gateway
-    pub fn with_router(mut self, router: Box<dyn crate::core::router::Router>) -> Self {
+    pub fn with_router(mut self, router: Box<dyn Router + Send + Sync>) -> Self {
         self.router = Some(router);
         self
     }
@@ -77,12 +153,21 @@ impl ApiGateway {
 impl Gateway for ApiGateway {
     async fn process_request(
         &self,
-        _request: GatewayRequest,
+        request: GatewayRequest,
     ) -> Result<GatewayResponse, GatewayError> {
-        // Will be implemented in future tasks
-        Err(GatewayError::InternalError(
-            "Not implemented yet".to_string(),
-        ))
+        // Check if router is configured
+        let router = match &self.router {
+            Some(router) => router,
+            None => {
+                return Err(GatewayError::InternalError(
+                    "Router not configured".to_string(),
+                ));
+            }
+        };
+
+        // Create a request handler and process the request
+        let handler = RequestHandler::new(router.clone_box());
+        handler.process_request(request).await
     }
 
     async fn start(&self) -> Result<(), GatewayError> {
@@ -94,10 +179,86 @@ impl Gateway for ApiGateway {
             ));
         }
 
+        // Check if router is configured
+        let router = match &self.router {
+            Some(router) => router.clone_box(),
+            None => {
+                return Err(GatewayError::InternalError(
+                    "Router not configured".to_string(),
+                ));
+            }
+        };
+
+        // Create a request handler
+        let handler = Arc::new(RequestHandler::new(router));
+
         // Create a new Axum router
         let app = axum::Router::new()
             // Add a basic health check endpoint
             .route("/health", axum::routing::get(|| async { "OK" }))
+            // Add a catch-all route for API Gateway
+            .fallback(move |req: axum::http::Request<axum::body::Body>| {
+                let handler = handler.clone();
+                async move {
+                    // Convert Axum request to GatewayRequest
+                    let (parts, body) = req.into_parts();
+                    let body_bytes = match hyper::body::to_bytes(body).await {
+                        Ok(bytes) => bytes,
+                        Err(e) => {
+                            tracing::error!("Failed to read request body: {}", e);
+                            return axum::http::Response::builder()
+                                .status(500)
+                                .body(axum::body::Body::from("Failed to read request body"))
+                                .unwrap();
+                        }
+                    };
+
+                    let client_ip = parts
+                        .headers
+                        .get("x-forwarded-for")
+                        .and_then(|v| v.to_str().ok())
+                        .and_then(|s| s.split(',').next())
+                        .and_then(|s| s.trim().parse().ok());
+
+                    let gateway_request = GatewayRequest::new(
+                        parts.method,
+                        parts.uri,
+                        parts.headers,
+                        body_bytes,
+                        client_ip,
+                    );
+
+                    // Process the request
+                    match handler.process_request(gateway_request).await {
+                        Ok(response) => {
+                            // Convert GatewayResponse to Axum response
+                            let mut builder =
+                                axum::http::Response::builder().status(response.status);
+
+                            // Add headers
+                            for (name, value) in response.headers.iter() {
+                                builder = builder.header(name, value);
+                            }
+
+                            builder.body(axum::body::Body::from(response.body)).unwrap()
+                        }
+                        Err(e) => {
+                            // Handle error
+                            let status = e.status_code();
+                            let body = format!(
+                                "{{\"error\":\"{}\"}}",
+                                e.to_string().replace('\"', "\\\"")
+                            );
+
+                            axum::http::Response::builder()
+                                .status(status)
+                                .header("content-type", "application/json")
+                                .body(axum::body::Body::from(body))
+                                .unwrap()
+                        }
+                    }
+                }
+            })
             // Add middleware for request tracing
             .layer(tower_http::trace::TraceLayer::new_for_http());
 

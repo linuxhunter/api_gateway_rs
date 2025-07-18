@@ -24,6 +24,75 @@ async fn main() -> Result<(), GatewayError> {
 
     // Load configuration
     let config_manager = Arc::new(BasicConfigManager::new());
+
+    // Try to load configuration from file
+    let config_path = std::env::var("CONFIG_PATH").unwrap_or_else(|_| "config.yaml".to_string());
+    if std::path::Path::new(&config_path).exists() {
+        match config_manager.load_from_file(&config_path).await {
+            Ok(_) => {
+                tracing::info!("Configuration loaded from {}", config_path);
+
+                // Create a static path for watching
+                let config_path_owned = config_path.clone();
+
+                // Start watching the configuration file for changes
+                if let Err(e) = config_manager.watch_config_file(config_path_owned).await {
+                    tracing::warn!("Failed to watch configuration file: {}", e);
+                } else {
+                    tracing::info!("Watching configuration file for changes: {}", config_path);
+
+                    // Subscribe to configuration changes
+                    let mut config_changes = config_manager.subscribe_to_changes().await;
+
+                    // Spawn a task to handle configuration changes
+                    tokio::spawn(async move {
+                        while let Ok(event) = config_changes.recv().await {
+                            match event.source {
+                                config::ConfigChangeSource::FileReload(path) => {
+                                    tracing::info!(
+                                        "Configuration reloaded from {}",
+                                        path.display()
+                                    );
+                                    // Here you would handle the configuration change
+                                    // For example, update routes, middlewares, etc.
+                                }
+                                config::ConfigChangeSource::FileLoad(path) => {
+                                    tracing::info!("Configuration loaded from {}", path.display());
+                                }
+                                config::ConfigChangeSource::ProgrammaticUpdate => {
+                                    tracing::info!("Configuration updated programmatically");
+                                }
+                            }
+
+                            // You could implement dynamic reconfiguration here
+                            // For example, update routes, middlewares, etc.
+                        }
+                    });
+                }
+            }
+            Err(e) => {
+                tracing::warn!("Failed to load configuration from {}: {}", config_path, e);
+                tracing::info!("Using default configuration");
+            }
+        }
+    } else {
+        tracing::info!(
+            "Configuration file {} not found, using default configuration",
+            config_path
+        );
+
+        // Save default configuration to file for reference
+        if let Err(e) = config_manager.save_to_file(&config_path).await {
+            tracing::warn!(
+                "Failed to save default configuration to {}: {}",
+                config_path,
+                e
+            );
+        } else {
+            tracing::info!("Default configuration saved to {}", config_path);
+        }
+    }
+
     let config = config_manager.get_config().await;
 
     // Create router

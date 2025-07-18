@@ -1,13 +1,14 @@
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::{Duration, SystemTime};
 
 use async_trait::async_trait;
 use config::Config;
 use notify::{Config as NotifyConfig, RecommendedWatcher, RecursiveMode, Watcher};
 use serde::{Deserialize, Serialize};
-use tokio::sync::{mpsc, RwLock};
-use tracing::{debug, error, info};
+use tokio::sync::{broadcast, mpsc, RwLock};
+use tracing::{debug, error, info, warn};
 
 use crate::error::ConfigError;
 
@@ -550,6 +551,32 @@ impl RouteDefinition {
     }
 }
 
+/// Configuration change event
+#[derive(Debug, Clone)]
+pub struct ConfigChangeEvent {
+    /// The new configuration
+    pub config: GatewayConfig,
+    
+    /// The source of the change
+    pub source: ConfigChangeSource,
+    
+    /// Timestamp of the change
+    pub timestamp: SystemTime,
+}
+
+/// Source of a configuration change
+#[derive(Debug, Clone, PartialEq)]
+pub enum ConfigChangeSource {
+    /// Configuration was loaded from a file
+    FileLoad(PathBuf),
+    
+    /// Configuration was updated programmatically
+    ProgrammaticUpdate,
+    
+    /// Configuration was reloaded due to file change
+    FileReload(PathBuf),
+}
+
 /// Configuration manager trait
 #[async_trait]
 pub trait ConfigManager: Send + Sync {
@@ -570,18 +597,33 @@ pub trait ConfigManager: Send + Sync {
         &self,
         path: P,
     ) -> Result<(), ConfigError>;
+    
+    /// Subscribe to configuration changes
+    async fn subscribe_to_changes(&self) -> broadcast::Receiver<ConfigChangeEvent>;
+    
+    /// Stop watching configuration file
+    async fn stop_watching(&self) -> Result<(), ConfigError>;
 }
 
 /// Basic implementation of the ConfigManager
 pub struct BasicConfigManager {
     config: Arc<RwLock<GatewayConfig>>,
+    change_tx: broadcast::Sender<ConfigChangeEvent>,
+    watcher_shutdown_tx: Arc<RwLock<Option<mpsc::Sender<()>>>>,
+    watched_path: Arc<RwLock<Option<PathBuf>>>,
 }
 
 impl BasicConfigManager {
     /// Create a new BasicConfigManager with default configuration
     pub fn new() -> Self {
+        // Create a broadcast channel for configuration changes
+        let (change_tx, _) = broadcast::channel(16);
+        
         Self {
             config: Arc::new(RwLock::new(GatewayConfig::default())),
+            change_tx,
+            watcher_shutdown_tx: Arc::new(RwLock::new(None)),
+            watched_path: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -589,9 +631,15 @@ impl BasicConfigManager {
     pub fn with_config(config: GatewayConfig) -> Result<Self, ConfigError> {
         // Validate the configuration before creating the manager
         config.validate()?;
+        
+        // Create a broadcast channel for configuration changes
+        let (change_tx, _) = broadcast::channel(16);
 
         Ok(Self {
             config: Arc::new(RwLock::new(config)),
+            change_tx,
+            watcher_shutdown_tx: Arc::new(RwLock::new(None)),
+            watched_path: Arc::new(RwLock::new(None)),
         })
     }
 
@@ -599,21 +647,20 @@ impl BasicConfigManager {
     fn parse_config(content: &str, format: &str) -> Result<GatewayConfig, ConfigError> {
         let config_builder = Config::builder();
 
-        let config_result =
-            match format {
-                "json" => config_builder
-                    .add_source(config::File::from_str(content, config::FileFormat::Json)),
-                "yaml" | "yml" => config_builder
-                    .add_source(config::File::from_str(content, config::FileFormat::Yaml)),
-                "toml" => config_builder
-                    .add_source(config::File::from_str(content, config::FileFormat::Toml)),
-                _ => {
-                    return Err(ConfigError::ValidationError(format!(
-                        "Unsupported configuration format: {}",
-                        format
-                    )))
-                }
-            };
+        let config_result = match format {
+            "json" => config_builder
+                .add_source(config::File::from_str(content, config::FileFormat::Json)),
+            "yaml" | "yml" => config_builder
+                .add_source(config::File::from_str(content, config::FileFormat::Yaml)),
+            "toml" => config_builder
+                .add_source(config::File::from_str(content, config::FileFormat::Toml)),
+            _ => {
+                return Err(ConfigError::ValidationError(format!(
+                    "Unsupported configuration format: {}",
+                    format
+                )))
+            }
+        };
 
         let config_built = config_result
             .build()
@@ -636,6 +683,20 @@ impl BasicConfigManager {
                     "Configuration file must have an extension".to_string(),
                 )
             })
+    }
+    
+    /// Notify subscribers about configuration changes
+    async fn notify_change(&self, source: ConfigChangeSource) {
+        let config = self.config.read().await.clone();
+        let event = ConfigChangeEvent {
+            config,
+            source,
+            timestamp: SystemTime::now(),
+        };
+        
+        // Send the event to all subscribers
+        // It's OK if there are no subscribers or if sending fails
+        let _ = self.change_tx.send(event);
     }
 }
 
@@ -669,31 +730,7 @@ impl ConfigManager for BasicConfigManager {
         })?;
 
         // Parse the configuration
-        let config_builder = Config::builder();
-
-        let config_result = match format {
-            "json" => config_builder
-                .add_source(config::File::from_str(&content, config::FileFormat::Json)),
-            "yaml" | "yml" => config_builder
-                .add_source(config::File::from_str(&content, config::FileFormat::Yaml)),
-            "toml" => config_builder
-                .add_source(config::File::from_str(&content, config::FileFormat::Toml)),
-            _ => {
-                return Err(ConfigError::ValidationError(format!(
-                    "Unsupported configuration format: {}",
-                    format
-                )))
-            }
-        };
-
-        let config_built = config_result
-            .build()
-            .map_err(|e| ConfigError::LoadError(format!("Failed to build configuration: {}", e)))?;
-
-        // Convert to our GatewayConfig
-        let gateway_config: GatewayConfig = config_built
-            .try_deserialize()
-            .map_err(|e| ConfigError::ValidationError(format!("Invalid configuration: {}", e)))?;
+        let gateway_config = Self::parse_config(&content, format)?;
 
         // Validate the configuration
         gateway_config.validate()?;
@@ -701,6 +738,10 @@ impl ConfigManager for BasicConfigManager {
         // Update the configuration
         let mut current_config = self.config.write().await;
         *current_config = gateway_config;
+
+        // Notify subscribers about the change
+        drop(current_config); // Release the write lock before notifying
+        self.notify_change(ConfigChangeSource::FileLoad(path.to_path_buf())).await;
 
         info!("Configuration loaded successfully from {}", path.display());
         Ok(())
@@ -774,6 +815,10 @@ impl ConfigManager for BasicConfigManager {
         // Update the configuration
         let mut current_config = self.config.write().await;
         *current_config = config;
+        
+        // Notify subscribers about the change
+        drop(current_config); // Release the write lock before notifying
+        self.notify_change(ConfigChangeSource::ProgrammaticUpdate).await;
 
         info!("Configuration updated successfully");
         Ok(())
@@ -792,23 +837,47 @@ impl ConfigManager for BasicConfigManager {
                 path.display()
             )));
         }
+        
+        // Check if we're already watching a file
+        let mut watched_path = self.watched_path.write().await;
+        if watched_path.is_some() {
+            // Stop watching the current file first
+            drop(watched_path); // Release the lock before calling stop_watching
+            self.stop_watching().await?;
+            watched_path = self.watched_path.write().await; // Re-acquire the lock
+        }
+        
+        // Update the watched path
+        *watched_path = Some(path.clone());
+        drop(watched_path); // Release the lock
 
-        // Create a channel for the watcher to communicate with the manager
-        let (tx, mut rx) = mpsc::channel::<()>(1);
+        // Create channels for the watcher
+        let (shutdown_tx, mut shutdown_rx) = mpsc::channel::<()>(1);
+        let (event_tx, mut event_rx) = mpsc::channel::<()>(16);
+        
+        // Store the shutdown sender
+        let mut watcher_shutdown = self.watcher_shutdown_tx.write().await;
+        *watcher_shutdown = Some(shutdown_tx);
+        drop(watcher_shutdown); // Release the lock
 
-        // Create a watcher
+        // Clone the necessary data for the watcher task
         let config_clone = self.config.clone();
         let path_clone = path.clone();
+        let change_tx = self.change_tx.clone();
 
         // Spawn a task to watch for file changes
         tokio::spawn(async move {
+            // Create a debounce timer to avoid processing too many events
+            let mut debounce_timer = tokio::time::interval(Duration::from_millis(500));
+            let mut pending_reload = false;
+            
             // Create a watcher
             let mut watcher = match RecommendedWatcher::new(
                 move |res| {
                     match res {
                         Ok(_) => {
-                            // File changed, reload the configuration
-                            let _ = tx.try_send(());
+                            // File changed, send an event
+                            let _ = event_tx.try_send(());
                         }
                         Err(e) => {
                             error!("Error watching configuration file: {}", e);
@@ -836,86 +905,117 @@ impl ConfigManager for BasicConfigManager {
 
             info!("Watching configuration file: {}", path_clone.display());
 
-            // Wait for file change events
-            while rx.recv().await.is_some() {
-                debug!("Configuration file changed, reloading");
-
-                // Read the file content
-                let content = match fs::read_to_string(&path_clone) {
-                    Ok(content) => content,
-                    Err(e) => {
-                        error!(
-                            "Failed to read configuration file {}: {}",
-                            path_clone.display(),
-                            e
-                        );
-                        continue;
+            // Process events with debouncing
+            loop {
+                tokio::select! {
+                    // Check for shutdown signal
+                    _ = shutdown_rx.recv() => {
+                        info!("Stopping configuration file watcher for {}", path_clone.display());
+                        break;
                     }
-                };
-
-                // Get the file format
-                let format = match path_clone.extension().and_then(|ext| ext.to_str()) {
-                    Some(ext) => ext,
-                    None => {
-                        error!("Configuration file must have an extension");
-                        continue;
+                    
+                    // Check for file change events
+                    Some(_) = event_rx.recv() => {
+                        debug!("Configuration file change detected, scheduling reload");
+                        pending_reload = true;
                     }
-                };
-
-                // Parse the configuration
-                let config_builder = Config::builder();
-
-                let config_result = match format {
-                    "json" => config_builder
-                        .add_source(config::File::from_str(&content, config::FileFormat::Json)),
-                    "yaml" | "yml" => config_builder
-                        .add_source(config::File::from_str(&content, config::FileFormat::Yaml)),
-                    "toml" => config_builder
-                        .add_source(config::File::from_str(&content, config::FileFormat::Toml)),
-                    _ => {
-                        error!("Unsupported configuration format: {}", format);
-                        continue;
+                    
+                    // Process debounced events
+                    _ = debounce_timer.tick() => {
+                        if pending_reload {
+                            debug!("Processing configuration file change");
+                            pending_reload = false;
+                            
+                            // Reload the configuration
+                            if let Err(e) = reload_config(&path_clone, &config_clone, &change_tx).await {
+                                error!("Failed to reload configuration: {}", e);
+                            }
+                        }
                     }
-                };
-
-                let config_built = match config_result.build() {
-                    Ok(config) => config,
-                    Err(e) => {
-                        error!("Failed to build configuration: {}", e);
-                        continue;
-                    }
-                };
-
-                // Convert to our GatewayConfig
-                let gateway_config: GatewayConfig = match config_built.try_deserialize() {
-                    Ok(config) => config,
-                    Err(e) => {
-                        error!("Invalid configuration: {}", e);
-                        continue;
-                    }
-                };
-
-                // Validate the configuration
-                if let Err(e) = gateway_config.validate() {
-                    error!("Invalid configuration: {}", e);
-                    continue;
                 }
-
-                // Update the configuration
-                let mut current_config = match config_clone.write().await {
-                    config => config,
-                };
-
-                *current_config = gateway_config;
-
-                info!(
-                    "Configuration reloaded successfully from {}",
-                    path_clone.display()
-                );
             }
         });
 
         info!("Configuration file watcher started for {}", path.display());
         Ok(())
     }
+    
+    async fn subscribe_to_changes(&self) -> broadcast::Receiver<ConfigChangeEvent> {
+        self.change_tx.subscribe()
+    }
+    
+    async fn stop_watching(&self) -> Result<(), ConfigError> {
+        // Check if we're watching a file
+        let mut watched_path = self.watched_path.write().await;
+        if watched_path.is_none() {
+            // Not watching any file
+            return Ok(());
+        }
+        
+        // Get the path we're watching
+        let path = watched_path.take().unwrap();
+        
+        // Send shutdown signal to the watcher task
+        let mut watcher_shutdown = self.watcher_shutdown_tx.write().await;
+        if let Some(tx) = watcher_shutdown.take() {
+            // Send shutdown signal
+            if let Err(e) = tx.send(()).await {
+                warn!("Failed to send shutdown signal to watcher: {}", e);
+            }
+        }
+        
+        info!("Stopped watching configuration file: {}", path.display());
+        Ok(())
+    }
+}
+
+/// Helper function to reload configuration from a file
+async fn reload_config(
+    path: &Path,
+    config: &Arc<RwLock<GatewayConfig>>,
+    change_tx: &broadcast::Sender<ConfigChangeEvent>,
+) -> Result<(), ConfigError> {
+    // Read the file content
+    let content = fs::read_to_string(path).map_err(|e| {
+        ConfigError::LoadError(format!(
+            "Failed to read configuration file {}: {}",
+            path.display(),
+            e
+        ))
+    })?;
+
+    // Get the file format
+    let format = match path.extension().and_then(|ext| ext.to_str()) {
+        Some(ext) => ext,
+        None => {
+            return Err(ConfigError::ValidationError(
+                "Configuration file must have an extension".to_string(),
+            ));
+        }
+    };
+
+    // Parse the configuration
+    let gateway_config = BasicConfigManager::parse_config(&content, format)?;
+
+    // Validate the configuration
+    gateway_config.validate()?;
+
+    // Update the configuration
+    let mut current_config = config.write().await;
+    *current_config = gateway_config.clone();
+    drop(current_config); // Release the write lock
+
+    // Notify subscribers about the change
+    let event = ConfigChangeEvent {
+        config: gateway_config,
+        source: ConfigChangeSource::FileReload(path.to_path_buf()),
+        timestamp: SystemTime::now(),
+    };
+    
+    // Send the event to all subscribers
+    // It's OK if there are no subscribers or if sending fails
+    let _ = change_tx.send(event);
+
+    info!("Configuration reloaded successfully from {}", path.display());
+    Ok(())
 }

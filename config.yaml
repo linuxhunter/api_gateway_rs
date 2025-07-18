@@ -1,0 +1,27 @@
+server:
+  host: 127.0.0.1
+  port: 8080
+  max_connections: 1024
+  request_timeout: 30
+auth:
+  enabled: false
+  jwt_secret: null
+  auth_service_url: null
+  token_expiration: 3600
+load_balancer:
+  algorithm: round_robin
+  health_check_interval: 10
+  health_check_timeout: 2
+  health_check_path: /health
+cache:
+  enabled: false
+  cache_type: memory
+  default_ttl: 60
+  redis_url: null
+  max_memory_size: 100
+logging:
+  level: info
+  log_to_file: false
+  log_file: null
+  json_format: false
+routes: []

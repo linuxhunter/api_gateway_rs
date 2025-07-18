@@ -116,4 +116,7 @@ pub enum ConfigError {
     
     #[error("Failed to watch configuration file: {0}")]
     WatchError(String),
+    
+    #[error("Configuration change notification error: {0}")]
+    NotificationError(String),
 }

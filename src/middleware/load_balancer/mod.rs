@@ -6,9 +6,10 @@ use async_trait::async_trait;
 use tokio::sync::RwLock;
 use hyper::Uri;
 
-// Include the strategies and examples modules
+// Include the strategies, examples, and tests modules
 pub mod strategies;
 pub mod examples;
+pub mod tests;
 
 use crate::core::request::GatewayRequest;
 use crate::core::response::GatewayResponse;

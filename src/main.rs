@@ -14,6 +14,8 @@ use crate::config::{BasicConfigManager, ConfigManager};
 use crate::core::gateway::{ApiGateway, Gateway};
 use crate::core::router::Router;
 use crate::error::GatewayError;
+use crate::middleware::logging::LoggingMiddleware;
+use crate::middleware::timing::TimingMiddleware;
 
 #[tokio::main]
 async fn main() -> Result<(), GatewayError> {
@@ -120,9 +122,27 @@ async fn main() -> Result<(), GatewayError> {
             .expect("Failed to add route to router");
     }
 
+    // Create the API Gateway
     let gateway = Arc::new(
         ApiGateway::with_config(config.server.clone()).with_router(Box::new(router_clone)),
     );
+
+    // Register middlewares
+    tracing::info!("Registering middlewares");
+
+    // Register logging middleware
+    gateway
+        .register_middleware(LoggingMiddleware::detailed())
+        .await
+        .expect("Failed to register logging middleware");
+
+    // Register timing middleware
+    gateway
+        .register_middleware(TimingMiddleware::default())
+        .await
+        .expect("Failed to register timing middleware");
+
+    tracing::info!("Middlewares registered successfully");
 
     // Start the gateway
     tracing::info!(

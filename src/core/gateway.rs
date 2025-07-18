@@ -106,7 +106,24 @@ pub struct ApiGateway {
     /// Server configuration
     config: crate::config::ServerConfig,
     /// Server state (handle and shutdown sender)
-    server_state: tokio::sync::Mutex<ServerState>,
+    server_state: Arc<tokio::sync::Mutex<ServerState>>,
+    /// Middleware registry
+    middleware_registry: Arc<tokio::sync::RwLock<crate::core::middleware::MiddlewareRegistry>>,
+}
+
+// Manual implementation of Clone for ApiGateway
+impl Clone for ApiGateway {
+    fn clone(&self) -> Self {
+        // We can't clone the router directly, but we can use clone_box if needed
+        let router = self.router.as_ref().map(|r| r.clone_box());
+        
+        Self {
+            router,
+            config: self.config.clone(),
+            server_state: self.server_state.clone(),
+            middleware_registry: self.middleware_registry.clone(),
+        }
+    }
 }
 
 /// Server state that can be mutated
@@ -123,10 +140,13 @@ impl ApiGateway {
         Self {
             router: None,
             config: crate::config::ServerConfig::default(),
-            server_state: tokio::sync::Mutex::new(ServerState {
+            server_state: Arc::new(tokio::sync::Mutex::new(ServerState {
                 server_handle: None,
                 shutdown_tx: None,
-            }),
+            })),
+            middleware_registry: Arc::new(tokio::sync::RwLock::new(
+                crate::core::middleware::MiddlewareRegistry::new()
+            )),
         }
     }
 
@@ -135,10 +155,13 @@ impl ApiGateway {
         Self {
             router: None,
             config,
-            server_state: tokio::sync::Mutex::new(ServerState {
+            server_state: Arc::new(tokio::sync::Mutex::new(ServerState {
                 server_handle: None,
                 shutdown_tx: None,
-            }),
+            })),
+            middleware_registry: Arc::new(tokio::sync::RwLock::new(
+                crate::core::middleware::MiddlewareRegistry::new()
+            )),
         }
     }
 
@@ -146,6 +169,41 @@ impl ApiGateway {
     pub fn with_router(mut self, router: Box<dyn Router + Send + Sync>) -> Self {
         self.router = Some(router);
         self
+    }
+    
+    /// Register a middleware with this gateway
+    pub async fn register_middleware<M>(&self, middleware: M) -> Result<(), GatewayError>
+    where
+        M: crate::core::middleware::Middleware + 'static,
+    {
+        let mut registry = self.middleware_registry.write().await;
+        registry.register(middleware);
+        tracing::info!("Registered middleware: {}", registry.get_all().last().unwrap().name());
+        Ok(())
+    }
+    
+    /// Get all registered middlewares
+    pub async fn get_middlewares(&self) -> Vec<Arc<dyn crate::core::middleware::Middleware>> {
+        let registry = self.middleware_registry.read().await;
+        registry.get_all()
+    }
+    
+    /// Create a middleware chain with the registered middlewares
+    async fn create_middleware_chain(
+        &self,
+        final_handler: impl Fn(GatewayRequest) -> futures::future::BoxFuture<'static, Result<GatewayResponse, GatewayError>>
+            + Send
+            + Sync
+            + 'static,
+    ) -> Arc<dyn crate::core::middleware::MiddlewareHandler> {
+        let registry = self.middleware_registry.read().await;
+        let chain = registry.create_chain();
+        
+        // Create the final handler that will process the request after all middleware
+        let final_handler = Arc::new(crate::core::middleware::FinalHandler::new(final_handler));
+        
+        // Build the middleware chain
+        chain.build(final_handler)
     }
 }
 
@@ -156,7 +214,7 @@ impl Gateway for ApiGateway {
         request: GatewayRequest,
     ) -> Result<GatewayResponse, GatewayError> {
         // Check if router is configured
-        let router = match &self.router {
+        let _router = match &self.router {
             Some(router) => router,
             None => {
                 return Err(GatewayError::InternalError(
@@ -165,9 +223,19 @@ impl Gateway for ApiGateway {
             }
         };
 
-        // Create a request handler and process the request
-        let handler = RequestHandler::new(router.clone_box());
-        handler.process_request(request).await
+        // Clone the router for the final handler
+        let router_clone = _router.clone_box();
+        
+        // Create a middleware chain with the final handler
+        let middleware_chain = self.create_middleware_chain(move |req| {
+            let handler = RequestHandler::new(router_clone.clone_box());
+            Box::pin(async move {
+                handler.process_request(req).await
+            })
+        }).await;
+        
+        // Process the request through the middleware chain
+        middleware_chain.handle(request).await
     }
 
     async fn start(&self) -> Result<(), GatewayError> {
@@ -189,8 +257,8 @@ impl Gateway for ApiGateway {
             }
         };
 
-        // Create a request handler
-        let handler = Arc::new(RequestHandler::new(router));
+        // Create a self reference for the fallback closure
+        let gateway_ref = Arc::new(self.clone());
 
         // Create a new Axum router
         let app = axum::Router::new()
@@ -198,7 +266,7 @@ impl Gateway for ApiGateway {
             .route("/health", axum::routing::get(|| async { "OK" }))
             // Add a catch-all route for API Gateway
             .fallback(move |req: axum::http::Request<axum::body::Body>| {
-                let handler = handler.clone();
+                let gateway = gateway_ref.clone();
                 async move {
                     // Convert Axum request to GatewayRequest
                     let (parts, body) = req.into_parts();
@@ -228,8 +296,8 @@ impl Gateway for ApiGateway {
                         client_ip,
                     );
 
-                    // Process the request
-                    match handler.process_request(gateway_request).await {
+                    // Process the request through the gateway (which uses middleware chain)
+                    match gateway.process_request(gateway_request).await {
                         Ok(response) => {
                             // Convert GatewayResponse to Axum response
                             let mut builder =

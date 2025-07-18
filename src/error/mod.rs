@@ -103,6 +103,18 @@ pub enum LoadBalancerError {
     
     #[error("Backend connection failed: {0}")]
     ConnectionFailed(String),
+    
+    #[error("Backend not found: {0}")]
+    BackendNotFound(String),
+    
+    #[error("Backend already exists: {0}")]
+    BackendAlreadyExists(String),
+    
+    #[error("Service discovery error: {0}")]
+    ServiceDiscoveryError(String),
+    
+    #[error("Invalid load balancing algorithm: {0}")]
+    InvalidAlgorithm(String),
 }
 
 /// Configuration specific errors

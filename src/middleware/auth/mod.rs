@@ -1,4 +1,6 @@
 pub mod models;
+pub mod jwt;
+pub mod jwt_middleware;
 
 use std::sync::Arc;
 

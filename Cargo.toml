@@ -46,6 +46,8 @@ jwt = "0.16"
 hmac = "0.12"
 sha2 = "0.10"
 rand = "0.8"
+rsa = { version = "0.9", features = ["pem"] }
+base64 = "0.21"
 
 [dev-dependencies]
 mockall = "0.11"

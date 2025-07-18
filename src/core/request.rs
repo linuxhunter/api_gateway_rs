@@ -56,7 +56,25 @@ impl GatewayRequest {
             .and_then(|v| v.to_str().ok())
             .map(|s| s.to_string())
     }
+    
+    /// Set the backend for this request
+    pub fn set_backend(&mut self, backend: &crate::models::Backend) {
+        // Add backend information to headers for downstream middleware
+        if let Ok(value) = hyper::header::HeaderValue::from_str(&backend.id) {
+            self.headers.insert("X-Backend-ID", value);
+        }
+        
+        if let Ok(value) = hyper::header::HeaderValue::from_str(&backend.host) {
+            self.headers.insert("X-Backend-Host", value);
+        }
+        
+        if let Ok(value) = hyper::header::HeaderValue::from_str(&backend.port.to_string()) {
+            self.headers.insert("X-Backend-Port", value);
+        }
+    }
 }
+
+// GatewayRequest already derives Clone
 
 /// Generate a unique request ID
 fn generate_request_id() -> String {

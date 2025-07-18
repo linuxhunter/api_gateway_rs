@@ -49,6 +49,9 @@ rand = "0.8"
 rsa = { version = "0.9", features = ["pem"] }
 base64 = "0.21"
 
+# HTTP client for health checks
+reqwest = { version = "0.11", features = ["json"] }
+
 [dev-dependencies]
 mockall = "0.11"
 tokio-test = "0.4"

@@ -3,11 +3,14 @@ use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
+use bytes::Bytes;
+use hyper::{HeaderMap, Method, Uri};
 use tokio::sync::RwLock;
-use hyper::Uri;
 
-// Include the strategies, examples, and tests modules
+// Include the strategies, health checker, examples, and tests modules
 pub mod strategies;
+pub mod health_checker;
+pub mod health_checker_tests;
 pub mod examples;
 pub mod tests;
 
@@ -429,17 +432,178 @@ impl LoadBalancerMiddleware {
         
         Ok(())
     }
+    
+    /// Stop the health checker
+    pub async fn stop_health_checker(&self) -> Result<(), LoadBalancerError> {
+        if let Some(health_checker) = &self.health_checker {
+            health_checker.stop_health_checks().await?;
+        }
+        
+        Ok(())
+    }
+    
+    /// Get healthy backends
+    pub async fn get_healthy_backends(&self) -> Vec<Backend> {
+        self.registry.get_healthy().await
+    }
+    
+    /// Get backend statistics
+    pub async fn get_backend_stats(&self) -> HashMap<String, BackendStats> {
+        self.registry.get_all_stats().await
+    }
 }
 
 #[async_trait]
 impl Middleware for LoadBalancerMiddleware {
     async fn process_request(
         &self,
-        request: GatewayRequest,
+        mut request: GatewayRequest,
         next: Arc<dyn MiddlewareHandler>,
     ) -> Result<GatewayResponse, GatewayError> {
-        // Will be implemented in future tasks
-        next.handle(request).await
+        // Get healthy backends
+        let backends = self.registry.get_healthy().await;
+        
+        if backends.is_empty() {
+            tracing::error!("No healthy backends available for request");
+            return Err(GatewayError::BackendUnavailable);
+        }
+        
+        // Select a backend using the strategy
+        let backend = if let Some(strategy) = &self.strategy {
+            match strategy.select_backend(&backends, &request).await {
+                Ok(backend) => backend,
+                Err(e) => {
+                    tracing::error!("Failed to select backend: {}", e);
+                    return Err(GatewayError::LoadBalancerError(e));
+                }
+            }
+        } else {
+            // Default to first healthy backend if no strategy is set
+            backends[0].clone()
+        };
+        
+        tracing::debug!("Selected backend {} for request", backend.id);
+        
+        // Update the request with the selected backend
+        request.set_backend(&backend);
+        
+        // Start timing the request
+        let start_time = std::time::Instant::now();
+        
+        // Forward the request to the next middleware
+        let result = next.handle(request).await;
+        
+        // Calculate response time
+        let response_time = start_time.elapsed();
+        let response_time_ms = response_time.as_millis() as u64;
+        
+        // Update backend statistics
+        if let Ok(ref response) = result {
+            // Update successful request stats
+            if let Err(e) = self.registry.update_stats(&backend.id, true, response_time_ms).await {
+                tracing::warn!("Failed to update backend stats: {}", e);
+            }
+            
+            tracing::debug!(
+                "Request to backend {} succeeded in {}ms with status {}",
+                backend.id,
+                response_time_ms,
+                response.status
+            );
+        } else {
+            // Update failed request stats
+            if let Err(e) = self.registry.update_stats(&backend.id, false, response_time_ms).await {
+                tracing::warn!("Failed to update backend stats: {}", e);
+            }
+            
+            tracing::warn!(
+                "Request to backend {} failed in {}ms: {:?}",
+                backend.id,
+                response_time_ms,
+                result.as_ref().err()
+            );
+            
+            // If this backend failed, trigger a health check
+            if let Some(health_checker) = &self.health_checker {
+                tracing::debug!("Request to backend {} failed, triggering health check", backend.id);
+                
+                // Spawn a task to perform the health check
+                let backend_clone = backend.clone();
+                let health_checker_clone = health_checker.clone();
+                let registry_clone = self.registry.clone();
+                
+                tokio::spawn(async move {
+                    let is_healthy = health_checker_clone.check_health(&backend_clone).await;
+                    
+                    if let Err(e) = registry_clone.update_health(&backend_clone.id, is_healthy).await {
+                        tracing::error!("Failed to update backend health: {}", e);
+                    } else if !is_healthy {
+                        tracing::warn!("Backend {} marked as unhealthy after failed request", backend_clone.id);
+                        
+                        // Try to find another healthy backend for future requests
+                        let healthy_backends = registry_clone.get_healthy().await;
+                        if healthy_backends.is_empty() {
+                            tracing::error!("No healthy backends available after marking {} as unhealthy", backend_clone.id);
+                        } else {
+                            tracing::info!("{} healthy backends still available", healthy_backends.len());
+                        }
+                    }
+                });
+                
+                // If the request failed due to backend unavailability, try to recover
+                if let Err(GatewayError::BackendUnavailable) = &result {
+                    // Get remaining healthy backends
+                    let remaining_healthy = self.registry.get_healthy().await;
+                    
+                    if !remaining_healthy.is_empty() {
+                        tracing::info!("Attempting request retry with another backend after failure");
+                        
+                        // Create a new request for retry (we can't use the original since it was moved)
+                        let mut retry_request = GatewayRequest::new(
+                            Method::GET, // Default method, will need to be improved
+                            Uri::from_static("/"), // Default URI, will need to be improved
+                            HeaderMap::new(),
+                            Bytes::new(),
+                            None,
+                        );
+                        
+                        // Select a different backend
+                        let retry_backend = if let Some(strategy) = &self.strategy {
+                            match strategy.select_backend(&remaining_healthy, &retry_request).await {
+                                Ok(b) => b,
+                                Err(_) => remaining_healthy[0].clone(),
+                            }
+                        } else {
+                            remaining_healthy[0].clone()
+                        };
+                        
+                        // Update the request with the new backend
+                        retry_request.set_backend(&retry_backend);
+                        
+                        tracing::debug!("Retrying request with backend {}", retry_backend.id);
+                        
+                        // Forward the request to the next middleware
+                        let retry_result = next.handle(retry_request).await;
+                        
+                        // If retry succeeded, return that result instead
+                        if retry_result.is_ok() {
+                            tracing::info!("Request retry succeeded with backend {}", retry_backend.id);
+                            return retry_result;
+                        }
+                        
+                        tracing::warn!("Request retry also failed with backend {}", retry_backend.id);
+                    }
+                }
+            }
+        }
+        
+        // Update strategy stats
+        if let Some(strategy) = &self.strategy {
+            strategy.update_stats(self.registry.get_all_stats().await).await;
+        }
+        
+        // Return the result
+        result
     }
     
     fn name(&self) -> &str {

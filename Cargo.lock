@@ -1241,6 +1241,7 @@ dependencies = [
  "config",
  "futures",
  "hmac",
+ "httpdate",
  "hyper",
  "jwt",
  "mockall",

@@ -40,6 +40,7 @@ async-trait = "0.1"
 once_cell = "1.17"
 regex = "1.8"
 serde_with = "3.0"
+httpdate = "1.0"
 
 # Authentication
 jwt = "0.16"

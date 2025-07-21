@@ -12,6 +12,7 @@ use crate::middleware::{Middleware, MiddlewareHandler};
 
 pub mod models;
 pub mod memory_store;
+pub mod redis_store;
 pub mod examples;
 use models::{CacheKeyOptions, CachePolicy, CachedResponse};
 

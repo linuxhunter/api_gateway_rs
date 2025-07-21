@@ -4,8 +4,9 @@ use std::time::Duration;
 use crate::core::request::GatewayRequest;
 use crate::core::response::GatewayResponse;
 use crate::middleware::cache::memory_store::MemoryStore;
-use crate::middleware::cache::models::{CachePolicy, CachedResponse};
-use crate::middleware::cache::{CacheMiddleware, CacheStore};
+use crate::middleware::cache::models::{CacheKeyOptions, CachePolicy};
+use crate::middleware::cache::redis_store::{RedisConfig, RedisStore};
+use crate::middleware::cache::CacheMiddleware;
 use crate::middleware::{Middleware, MiddlewareHandler};
 
 /// Example middleware handler for testing
@@ -15,115 +16,187 @@ struct ExampleHandler;
 impl MiddlewareHandler for ExampleHandler {
     async fn handle(&self, _request: GatewayRequest) -> Result<GatewayResponse, crate::error::GatewayError> {
         // Create a simple response
-        let response = GatewayResponse::new(
+        Ok(GatewayResponse::new(
             hyper::StatusCode::OK,
             hyper::HeaderMap::new(),
-            bytes::Bytes::from("Hello, World!"),
-        );
-        
-        Ok(response)
+            bytes::Bytes::from("Hello from example handler"),
+        ))
     }
 }
 
-/// Example of using the memory cache with LRU eviction
-pub async fn memory_cache_example() -> Result<(), Box<dyn std::error::Error>> {
-    println!("Memory Cache Example");
+/// Example of using memory cache
+pub async fn memory_cache_example() {
+    // Create a memory store
+    let store = MemoryStore::new();
     
-    // Create a memory store with LRU eviction
-    let store = Arc::new(MemoryStore::with_max_entries(100));
-    
-    // Create a cache policy
+    // Create cache policy
     let policy = CachePolicy {
         default_ttl: Duration::from_secs(60),
-        ..Default::default()
+        max_ttl: Duration::from_secs(3600),
+        cacheable_methods: vec![hyper::Method::GET],
+        cacheable_status_codes: vec![hyper::StatusCode::OK],
+        respect_cache_control: true,
+        key_options: CacheKeyOptions {
+            include_query: true,
+            include_headers: vec!["accept".to_string()],
+            include_method: true,
+            prefix: Some("example".to_string()),
+            normalize_path: true,
+        },
+        cache_authenticated: false,
     };
     
-    // Create a cache middleware
+    // Create cache middleware
     let cache_middleware = CacheMiddleware::new()
-        .with_store(store.clone())
+        .with_store(Arc::new(store))
         .with_policy(policy);
     
-    // Create a request
+    // Create example request
     let request = GatewayRequest::new(
         hyper::Method::GET,
-        "https://example.com/api/resource".parse().unwrap(),
+        "https://example.com/api/resource?param=value".parse().unwrap(),
         hyper::HeaderMap::new(),
         bytes::Bytes::new(),
         None,
     );
     
-    // Create a handler
+    // Create example handler
     let handler = Arc::new(ExampleHandler);
     
-    // Process the request through the cache middleware
-    let response = cache_middleware.process_request(request.clone(), handler.clone()).await?;
-    println!("First request: {:?}", response.status);
+    // Process request through cache middleware
+    let response = cache_middleware.process_request(request, handler).await;
     
-    // Process the same request again (should be cached)
-    let cached_response = cache_middleware.process_request(request.clone(), handler.clone()).await?;
-    println!("Second request (cached): {:?}", cached_response.status);
-    
-    // Get cache statistics
-    let stats = store.get_stats()?;
-    println!("Cache Statistics:");
-    println!("  Hits: {}", stats.hits);
-    println!("  Misses: {}", stats.misses);
-    println!("  Hit Ratio: {:.2}", stats.hit_ratio);
-    println!("  Insertions: {}", stats.insertions);
-    
-    // Demonstrate LRU eviction
-    println!("\nDemonstrating LRU eviction:");
-    
-    // Create a small cache for demonstration
-    let small_store = Arc::new(MemoryStore::with_max_entries(3));
-    
-    // Add some items
-    for i in 1..=3 {
-        let key = format!("key{}", i);
-        let response = CachedResponse {
-            status: 200,
-            headers: vec![],
-            body: vec![],
-            created_at: std::time::SystemTime::now()
-                .duration_since(std::time::SystemTime::UNIX_EPOCH)
-                .unwrap()
-                .as_secs(),
-            ttl: 60,
-            cache_key: key.clone(),
-            content_type: None,
-        };
-        
-        small_store.set(&key, response, Duration::from_secs(60)).await?;
-        println!("Added item: {}", key);
+    // Print response
+    match response {
+        Ok(resp) => {
+            println!("Status: {}", resp.status);
+            if let Some(cache_info) = &resp.cache_info {
+                println!("Cache hit: {}", cache_info.cache_hit);
+                println!("Cache key: {}", cache_info.cache_key);
+                if let Some(ttl) = cache_info.ttl_seconds {
+                    println!("TTL: {} seconds", ttl);
+                }
+            }
+        }
+        Err(e) => {
+            println!("Error: {}", e);
+        }
     }
-    
-    // Access key1 to make it most recently used
-    let _ = small_store.get("key1").await?;
-    println!("Accessed key1");
-    
-    // Add a 4th item, should evict key2 (least recently used)
-    let response = CachedResponse {
-        status: 200,
-        headers: vec![],
-        body: vec![],
-        created_at: std::time::SystemTime::now()
-            .duration_since(std::time::SystemTime::UNIX_EPOCH)
-            .unwrap()
-            .as_secs(),
-        ttl: 60,
-        cache_key: "key4".to_string(),
-        content_type: None,
+}
+
+/// Example of using Redis cache
+pub async fn redis_cache_example() -> Result<(), Box<dyn std::error::Error>> {
+    // Create Redis configuration
+    let redis_config = RedisConfig {
+        url: "redis://127.0.0.1:6379".to_string(),
+        pool_size: 5,
+        connection_timeout: 5,
     };
     
-    small_store.set("key4", response, Duration::from_secs(60)).await?;
-    println!("Added key4");
+    // Create Redis store
+    let store = RedisStore::new(redis_config).await?;
     
-    // Check what's in the cache
-    println!("Items in cache:");
-    println!("  key1: {}", small_store.exists("key1").await?);
-    println!("  key2: {}", small_store.exists("key2").await?);
-    println!("  key3: {}", small_store.exists("key3").await?);
-    println!("  key4: {}", small_store.exists("key4").await?);
+    // Create cache policy
+    let policy = CachePolicy {
+        default_ttl: Duration::from_secs(300), // 5 minutes
+        max_ttl: Duration::from_secs(3600),    // 1 hour
+        cacheable_methods: vec![hyper::Method::GET],
+        cacheable_status_codes: vec![hyper::StatusCode::OK],
+        respect_cache_control: true,
+        key_options: CacheKeyOptions {
+            include_query: true,
+            include_headers: vec!["accept".to_string()],
+            include_method: true,
+            prefix: Some("redis_example".to_string()),
+            normalize_path: true,
+        },
+        cache_authenticated: false,
+    };
+    
+    // Create cache middleware with Redis store
+    let cache_middleware = CacheMiddleware::new()
+        .with_store(Arc::new(store))
+        .with_policy(policy);
+    
+    // Create example request
+    let request = GatewayRequest::new(
+        hyper::Method::GET,
+        "https://example.com/api/resource?param=value".parse().unwrap(),
+        hyper::HeaderMap::new(),
+        bytes::Bytes::new(),
+        None,
+    );
+    
+    // Create example handler
+    let handler = Arc::new(ExampleHandler);
+    
+    // Process request through cache middleware
+    let response = cache_middleware.process_request(request, handler).await;
+    
+    // Print response
+    match response {
+        Ok(resp) => {
+            println!("Status: {}", resp.status);
+            if let Some(cache_info) = &resp.cache_info {
+                println!("Cache hit: {}", cache_info.cache_hit);
+                println!("Cache key: {}", cache_info.cache_key);
+                if let Some(ttl) = cache_info.ttl_seconds {
+                    println!("TTL: {} seconds", ttl);
+                }
+            }
+        }
+        Err(e) => {
+            println!("Error: {}", e);
+        }
+    }
+    
+    Ok(())
+}
+
+/// Example of configuring Redis cache with connection pool
+pub async fn redis_pool_example() -> Result<(), Box<dyn std::error::Error>> {
+    // Create Redis configuration with larger pool for high traffic
+    let redis_config = RedisConfig {
+        url: "redis://127.0.0.1:6379".to_string(),
+        pool_size: 20, // Larger pool for high traffic
+        connection_timeout: 2, // Shorter timeout
+    };
+    
+    // Create Redis store with custom prefix
+    let store = RedisStore::new(redis_config).await?
+        .with_prefix("api_gateway:production:");
+    
+    // Create cache policy optimized for API responses
+    let policy = CachePolicy {
+        default_ttl: Duration::from_secs(60),
+        max_ttl: Duration::from_secs(3600),
+        cacheable_methods: vec![hyper::Method::GET, hyper::Method::HEAD],
+        cacheable_status_codes: vec![
+            hyper::StatusCode::OK,
+            hyper::StatusCode::NOT_MODIFIED,
+            hyper::StatusCode::PARTIAL_CONTENT,
+        ],
+        respect_cache_control: true,
+        key_options: CacheKeyOptions {
+            include_query: true,
+            include_headers: vec![
+                "accept".to_string(),
+                "accept-language".to_string(),
+                "accept-encoding".to_string(),
+            ],
+            include_method: true,
+            prefix: Some("api".to_string()),
+            normalize_path: true,
+        },
+        cache_authenticated: false,
+    };
+    
+    // Create cache middleware with Redis store
+    let _cache_middleware = CacheMiddleware::new()
+        .with_store(Arc::new(store))
+        .with_policy(policy);
+    
+    println!("Redis cache middleware configured with connection pool");
     
     Ok(())
 }

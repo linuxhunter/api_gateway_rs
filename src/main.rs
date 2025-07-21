@@ -19,8 +19,8 @@ use crate::middleware::timing::TimingMiddleware;
 
 #[tokio::main]
 async fn main() -> Result<(), GatewayError> {
-    // Initialize tracing
-    tracing_subscriber::fmt::init();
+    // Initialize structured tracing with JSON formatting
+    middleware::logging::init_tracing("info");
 
     // Load configuration
     let config_manager = Arc::new(BasicConfigManager::new());

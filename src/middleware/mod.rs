@@ -2,6 +2,7 @@ pub mod auth;
 pub mod cache;
 pub mod load_balancer;
 pub mod logging;
+pub mod logging_examples;
 pub mod timing;
 
 use std::sync::Arc;

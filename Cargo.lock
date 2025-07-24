@@ -59,6 +59,47 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e16d2d3311acee920a9eb8d33b8cbc1787ce4a264e85f964c2404b969bdcd487"
 
 [[package]]
+name = "api_gateway"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "axum",
+ "base64 0.21.7",
+ "bytes",
+ "chrono",
+ "config",
+ "deadpool-redis",
+ "futures",
+ "hmac",
+ "httpdate",
+ "hyper",
+ "jwt",
+ "mockall",
+ "notify",
+ "once_cell",
+ "rand",
+ "redis",
+ "regex",
+ "reqwest",
+ "rsa",
+ "serde",
+ "serde_json",
+ "serde_with",
+ "serde_yaml",
+ "sha2",
+ "thiserror 1.0.69",
+ "tokio",
+ "tokio-test",
+ "toml 0.7.8",
+ "tower",
+ "tower-http",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+]
+
+[[package]]
 name = "arc-swap"
 version = "1.7.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1287,47 +1328,6 @@ dependencies = [
  "security-framework",
  "security-framework-sys",
  "tempfile",
-]
-
-[[package]]
-name = "new_api_gateway"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "axum",
- "base64 0.21.7",
- "bytes",
- "chrono",
- "config",
- "deadpool-redis",
- "futures",
- "hmac",
- "httpdate",
- "hyper",
- "jwt",
- "mockall",
- "notify",
- "once_cell",
- "rand",
- "redis",
- "regex",
- "reqwest",
- "rsa",
- "serde",
- "serde_json",
- "serde_with",
- "serde_yaml",
- "sha2",
- "thiserror 1.0.69",
- "tokio",
- "tokio-test",
- "toml 0.7.8",
- "tower",
- "tower-http",
- "tracing",
- "tracing-subscriber",
- "uuid",
 ]
 
 [[package]]

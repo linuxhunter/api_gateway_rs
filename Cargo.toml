@@ -1,5 +1,5 @@
 [package]
-name = "new_api_gateway"
+name = "api_gateway"
 version = "0.1.0"
 edition = "2021"
 description = "A high-performance API Gateway written in Rust"

@@ -1,6 +1,7 @@
 mod config;
 mod core;
 mod error;
+mod examples;
 mod middleware;
 mod models;
 

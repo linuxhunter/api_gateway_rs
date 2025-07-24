@@ -36,7 +36,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
     
     // Print service registry information
-    print_service_registry(&registry).await;
+    let _ = print_service_registry(&registry).await;
     
     // Wait for all services to complete (or Ctrl+C)
     println!("All services started. Press Ctrl+C to shutdown...");

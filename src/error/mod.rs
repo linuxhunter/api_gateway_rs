@@ -132,3 +132,112 @@ pub enum ConfigError {
     #[error("Configuration change notification error: {0}")]
     NotificationError(String),
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io;
+
+    #[test]
+    fn test_gateway_error_status_codes() {
+        assert_eq!(GatewayError::AuthenticationFailed("test".to_string()).status_code(), 401);
+        assert_eq!(GatewayError::BackendUnavailable.status_code(), 503);
+        assert_eq!(GatewayError::RequestTimeout.status_code(), 504);
+        assert_eq!(GatewayError::InternalError("test".to_string()).status_code(), 500);
+        assert_eq!(GatewayError::InvalidRequest("test".to_string()).status_code(), 400);
+        assert_eq!(GatewayError::RouteNotFound("test".to_string()).status_code(), 404);
+        assert_eq!(GatewayError::SerializationError("test".to_string()).status_code(), 500);
+    }
+
+    #[test]
+    fn test_gateway_error_from_cache_error() {
+        let cache_error = CacheError::ConnectionError("Redis down".to_string());
+        let gateway_error: GatewayError = cache_error.into();
+
+        if let GatewayError::CacheError(CacheError::ConnectionError(msg)) = gateway_error {
+            assert_eq!(msg, "Redis down");
+        } else {
+            panic!("Expected CacheError conversion");
+        }
+    }
+
+    #[test]
+    fn test_gateway_error_from_config_error() {
+        let config_error = ConfigError::ValidationError("Invalid config".to_string());
+        let gateway_error: GatewayError = config_error.into();
+
+        if let GatewayError::ConfigError(ConfigError::ValidationError(msg)) = gateway_error {
+            assert_eq!(msg, "Invalid config");
+        } else {
+            panic!("Expected ConfigError conversion");
+        }
+    }
+
+    #[test]
+    fn test_gateway_error_from_load_balancer_error() {
+        let lb_error = LoadBalancerError::NoBackendAvailable;
+        let gateway_error: GatewayError = lb_error.into();
+
+        if let GatewayError::LoadBalancerError(LoadBalancerError::NoBackendAvailable) = gateway_error {
+            // Expected
+        } else {
+            panic!("Expected LoadBalancerError conversion");
+        }
+    }
+
+    #[test]
+    fn test_gateway_error_from_auth_error() {
+        let auth_error = AuthError::InvalidToken;
+        let gateway_error: GatewayError = auth_error.into();
+
+        if let GatewayError::AuthError(AuthError::InvalidToken) = gateway_error {
+            // Expected
+        } else {
+            panic!("Expected AuthError conversion");
+        }
+    }
+
+    #[test]
+    fn test_gateway_error_from_io_error() {
+        let io_error = io::Error::new(io::ErrorKind::NotFound, "File not found");
+        let gateway_error: GatewayError = io_error.into();
+
+        if let GatewayError::IoError(_) = gateway_error {
+            // Expected
+        } else {
+            panic!("Expected IoError conversion");
+        }
+    }
+
+    #[test]
+    fn test_error_display() {
+        let error = GatewayError::AuthenticationFailed("test".to_string());
+        let display_str = format!("{}", error);
+        assert!(display_str.contains("Authentication failed"));
+        assert!(display_str.contains("test"));
+    }
+
+    #[test]
+    fn test_all_error_variants_have_status_codes() {
+        let test_errors = vec![
+            GatewayError::AuthenticationFailed("test".to_string()),
+            GatewayError::BackendUnavailable,
+            GatewayError::RequestTimeout,
+            GatewayError::CacheError(CacheError::ConnectionError("test".to_string())),
+            GatewayError::ConfigError(ConfigError::LoadError("test".to_string())),
+            GatewayError::LoadBalancerError(LoadBalancerError::NoBackendAvailable),
+            GatewayError::AuthError(AuthError::InvalidToken),
+            GatewayError::InternalError("test".to_string()),
+            GatewayError::InvalidRequest("test".to_string()),
+            GatewayError::RouteNotFound("test".to_string()),
+            GatewayError::IoError(io::Error::new(io::ErrorKind::Other, "test")),
+            GatewayError::SerializationError("test".to_string()),
+        ];
+
+        for error in test_errors {
+            let status_code = error.status_code();
+            assert!(status_code >= 400 && status_code < 600, 
+                "Status code {} should be a valid HTTP error code", status_code);
+        }
+    }
+}

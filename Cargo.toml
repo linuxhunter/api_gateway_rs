@@ -62,3 +62,4 @@ deadpool-redis = "0.12"
 [dev-dependencies]
 mockall = "0.11"
 tokio-test = "0.4"
+chrono = { version = "0.4", features = ["serde"] }

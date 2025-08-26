@@ -8,7 +8,7 @@ use async_trait::async_trait;
 use crate::core::request::GatewayRequest;
 use crate::core::response::{CacheInfo, GatewayResponse};
 use crate::error::{CacheError, GatewayError};
-use crate::middleware::{Middleware, MiddlewareHandler};
+use crate::core::middleware::{Middleware, MiddlewareHandler};
 
 pub mod models;
 pub mod memory_store;

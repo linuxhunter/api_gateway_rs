@@ -1,0 +1,58 @@
+server:
+  host: 127.0.0.1
+  port: 9000
+  max_connections: 100
+  request_timeout: 30
+
+auth:
+  enabled: false
+  jwt_secret: null
+  auth_service_url: null
+  token_expiration: 3600
+
+load_balancer:
+  algorithm: round_robin
+  health_check_interval: 5
+  health_check_timeout: 2
+  health_check_path: /health
+
+cache:
+  enabled: true
+  cache_type: memory
+  default_ttl: 60
+  redis_url: null
+  max_memory_size: 100
+
+logging:
+  level: info
+  log_to_file: false
+  log_file: null
+  json_format: false
+
+routes:
+  - path: "/api/users/:id"
+    method: "GET"
+    backends:
+      - "http://localhost:8081/users"
+    auth_required: true
+    cache_enabled: true
+    timeout_seconds: 10
+  
+  - path: "/api/health"
+    method: "GET"
+    backends:
+      - "http://localhost:8081/health"
+      - "http://localhost:8082/health"
+    auth_required: false
+    cache_enabled: false
+    timeout_seconds: 5
+
+  - path: "/api/data"
+    method: "POST"
+    backends:
+      - "http://localhost:8081/data"
+      - "http://localhost:8082/data"
+      - "http://localhost:8083/data"
+    auth_required: true
+    cache_enabled: false
+    timeout_seconds: 15

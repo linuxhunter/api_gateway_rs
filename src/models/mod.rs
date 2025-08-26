@@ -34,6 +34,63 @@ pub struct Backend {
     pub metadata: std::collections::HashMap<String, String>,
 }
 
+impl Backend {
+    /// Create a new backend with the given URL
+    pub fn new(url: String) -> Self {
+        // Parse URL to extract host and port
+        let parsed_url = url::Url::parse(&url).unwrap_or_else(|_| {
+            url::Url::parse(&format!("http://{}", url)).unwrap()
+        });
+        
+        let host = parsed_url.host_str().unwrap_or("localhost").to_string();
+        let port = parsed_url.port().unwrap_or(80);
+        let id = format!("{}:{}", host, port);
+
+        Self {
+            id,
+            url,
+            weight: 1,
+            healthy: true,
+            health_check_path: "/health".to_string(),
+            timeout_seconds: 30,
+            host,
+            port,
+            tags: Vec::new(),
+            metadata: std::collections::HashMap::new(),
+        }
+    }
+
+    /// Create a new backend with custom settings
+    pub fn with_weight(mut self, weight: u32) -> Self {
+        self.weight = weight;
+        self
+    }
+
+    /// Set the health check path
+    pub fn with_health_check_path(mut self, path: String) -> Self {
+        self.health_check_path = path;
+        self
+    }
+
+    /// Set the timeout
+    pub fn with_timeout(mut self, timeout_seconds: u64) -> Self {
+        self.timeout_seconds = timeout_seconds;
+        self
+    }
+
+    /// Add a tag
+    pub fn with_tag(mut self, tag: String) -> Self {
+        self.tags.push(tag);
+        self
+    }
+
+    /// Add metadata
+    pub fn with_metadata(mut self, key: String, value: String) -> Self {
+        self.metadata.insert(key, value);
+        self
+    }
+}
+
 /// Authentication token claims
 #[derive(Debug, Clone)]
 pub struct Claims {

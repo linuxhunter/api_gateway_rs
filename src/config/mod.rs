@@ -556,12 +556,29 @@ impl RouteDefinition {
 pub struct ConfigChangeEvent {
     /// The new configuration
     pub config: GatewayConfig,
-    
+
     /// The source of the change
     pub source: ConfigChangeSource,
-    
+
     /// Timestamp of the change
     pub timestamp: SystemTime,
+}
+
+impl ConfigChangeEvent {
+    /// Get the configuration from this event
+    pub fn config(&self) -> &GatewayConfig {
+        &self.config
+    }
+
+    /// Get the source of this configuration change
+    pub fn source(&self) -> &ConfigChangeSource {
+        &self.source
+    }
+
+    /// Get the timestamp of this configuration change
+    pub fn timestamp(&self) -> SystemTime {
+        self.timestamp
+    }
 }
 
 /// Source of a configuration change
@@ -569,10 +586,10 @@ pub struct ConfigChangeEvent {
 pub enum ConfigChangeSource {
     /// Configuration was loaded from a file
     FileLoad(PathBuf),
-    
+
     /// Configuration was updated programmatically
     ProgrammaticUpdate,
-    
+
     /// Configuration was reloaded due to file change
     FileReload(PathBuf),
 }
@@ -597,10 +614,10 @@ pub trait ConfigManager: Send + Sync {
         &self,
         path: P,
     ) -> Result<(), ConfigError>;
-    
+
     /// Subscribe to configuration changes
     async fn subscribe_to_changes(&self) -> broadcast::Receiver<ConfigChangeEvent>;
-    
+
     /// Stop watching configuration file
     async fn stop_watching(&self) -> Result<(), ConfigError>;
 }
@@ -618,7 +635,7 @@ impl BasicConfigManager {
     pub fn new() -> Self {
         // Create a broadcast channel for configuration changes
         let (change_tx, _) = broadcast::channel(16);
-        
+
         Self {
             config: Arc::new(RwLock::new(GatewayConfig::default())),
             change_tx,
@@ -631,7 +648,7 @@ impl BasicConfigManager {
     pub fn with_config(config: GatewayConfig) -> Result<Self, ConfigError> {
         // Validate the configuration before creating the manager
         config.validate()?;
-        
+
         // Create a broadcast channel for configuration changes
         let (change_tx, _) = broadcast::channel(16);
 
@@ -647,20 +664,21 @@ impl BasicConfigManager {
     fn parse_config(content: &str, format: &str) -> Result<GatewayConfig, ConfigError> {
         let config_builder = Config::builder();
 
-        let config_result = match format {
-            "json" => config_builder
-                .add_source(config::File::from_str(content, config::FileFormat::Json)),
-            "yaml" | "yml" => config_builder
-                .add_source(config::File::from_str(content, config::FileFormat::Yaml)),
-            "toml" => config_builder
-                .add_source(config::File::from_str(content, config::FileFormat::Toml)),
-            _ => {
-                return Err(ConfigError::ValidationError(format!(
-                    "Unsupported configuration format: {}",
-                    format
-                )))
-            }
-        };
+        let config_result =
+            match format {
+                "json" => config_builder
+                    .add_source(config::File::from_str(content, config::FileFormat::Json)),
+                "yaml" | "yml" => config_builder
+                    .add_source(config::File::from_str(content, config::FileFormat::Yaml)),
+                "toml" => config_builder
+                    .add_source(config::File::from_str(content, config::FileFormat::Toml)),
+                _ => {
+                    return Err(ConfigError::ValidationError(format!(
+                        "Unsupported configuration format: {}",
+                        format
+                    )))
+                }
+            };
 
         let config_built = config_result
             .build()
@@ -684,7 +702,7 @@ impl BasicConfigManager {
                 )
             })
     }
-    
+
     /// Notify subscribers about configuration changes
     async fn notify_change(&self, source: ConfigChangeSource) {
         let config = self.config.read().await.clone();
@@ -693,7 +711,7 @@ impl BasicConfigManager {
             source,
             timestamp: SystemTime::now(),
         };
-        
+
         // Send the event to all subscribers
         // It's OK if there are no subscribers or if sending fails
         let _ = self.change_tx.send(event);
@@ -741,7 +759,8 @@ impl ConfigManager for BasicConfigManager {
 
         // Notify subscribers about the change
         drop(current_config); // Release the write lock before notifying
-        self.notify_change(ConfigChangeSource::FileLoad(path.to_path_buf())).await;
+        self.notify_change(ConfigChangeSource::FileLoad(path.to_path_buf()))
+            .await;
 
         info!("Configuration loaded successfully from {}", path.display());
         Ok(())
@@ -815,10 +834,11 @@ impl ConfigManager for BasicConfigManager {
         // Update the configuration
         let mut current_config = self.config.write().await;
         *current_config = config;
-        
+
         // Notify subscribers about the change
         drop(current_config); // Release the write lock before notifying
-        self.notify_change(ConfigChangeSource::ProgrammaticUpdate).await;
+        self.notify_change(ConfigChangeSource::ProgrammaticUpdate)
+            .await;
 
         info!("Configuration updated successfully");
         Ok(())
@@ -837,7 +857,7 @@ impl ConfigManager for BasicConfigManager {
                 path.display()
             )));
         }
-        
+
         // Check if we're already watching a file
         let mut watched_path = self.watched_path.write().await;
         if watched_path.is_some() {
@@ -846,7 +866,7 @@ impl ConfigManager for BasicConfigManager {
             self.stop_watching().await?;
             watched_path = self.watched_path.write().await; // Re-acquire the lock
         }
-        
+
         // Update the watched path
         *watched_path = Some(path.clone());
         drop(watched_path); // Release the lock
@@ -854,7 +874,7 @@ impl ConfigManager for BasicConfigManager {
         // Create channels for the watcher
         let (shutdown_tx, mut shutdown_rx) = mpsc::channel::<()>(1);
         let (event_tx, mut event_rx) = mpsc::channel::<()>(16);
-        
+
         // Store the shutdown sender
         let mut watcher_shutdown = self.watcher_shutdown_tx.write().await;
         *watcher_shutdown = Some(shutdown_tx);
@@ -870,7 +890,7 @@ impl ConfigManager for BasicConfigManager {
             // Create a debounce timer to avoid processing too many events
             let mut debounce_timer = tokio::time::interval(Duration::from_millis(500));
             let mut pending_reload = false;
-            
+
             // Create a watcher
             let mut watcher = match RecommendedWatcher::new(
                 move |res| {
@@ -913,19 +933,19 @@ impl ConfigManager for BasicConfigManager {
                         info!("Stopping configuration file watcher for {}", path_clone.display());
                         break;
                     }
-                    
+
                     // Check for file change events
                     Some(_) = event_rx.recv() => {
                         debug!("Configuration file change detected, scheduling reload");
                         pending_reload = true;
                     }
-                    
+
                     // Process debounced events
                     _ = debounce_timer.tick() => {
                         if pending_reload {
                             debug!("Processing configuration file change");
                             pending_reload = false;
-                            
+
                             // Reload the configuration
                             if let Err(e) = reload_config(&path_clone, &config_clone, &change_tx).await {
                                 error!("Failed to reload configuration: {}", e);
@@ -939,11 +959,11 @@ impl ConfigManager for BasicConfigManager {
         info!("Configuration file watcher started for {}", path.display());
         Ok(())
     }
-    
+
     async fn subscribe_to_changes(&self) -> broadcast::Receiver<ConfigChangeEvent> {
         self.change_tx.subscribe()
     }
-    
+
     async fn stop_watching(&self) -> Result<(), ConfigError> {
         // Check if we're watching a file
         let mut watched_path = self.watched_path.write().await;
@@ -951,10 +971,10 @@ impl ConfigManager for BasicConfigManager {
             // Not watching any file
             return Ok(());
         }
-        
+
         // Get the path we're watching
         let path = watched_path.take().unwrap();
-        
+
         // Send shutdown signal to the watcher task
         let mut watcher_shutdown = self.watcher_shutdown_tx.write().await;
         if let Some(tx) = watcher_shutdown.take() {
@@ -963,7 +983,7 @@ impl ConfigManager for BasicConfigManager {
                 warn!("Failed to send shutdown signal to watcher: {}", e);
             }
         }
-        
+
         info!("Stopped watching configuration file: {}", path.display());
         Ok(())
     }
@@ -1011,11 +1031,14 @@ async fn reload_config(
         source: ConfigChangeSource::FileReload(path.to_path_buf()),
         timestamp: SystemTime::now(),
     };
-    
+
     // Send the event to all subscribers
     // It's OK if there are no subscribers or if sending fails
     let _ = change_tx.send(event);
 
-    info!("Configuration reloaded successfully from {}", path.display());
+    info!(
+        "Configuration reloaded successfully from {}",
+        path.display()
+    );
     Ok(())
 }

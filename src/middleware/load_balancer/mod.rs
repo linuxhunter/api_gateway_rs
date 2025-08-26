@@ -17,7 +17,7 @@ pub mod tests;
 use crate::core::request::GatewayRequest;
 use crate::core::response::GatewayResponse;
 use crate::error::{GatewayError, LoadBalancerError};
-use crate::middleware::{Middleware, MiddlewareHandler};
+use crate::core::middleware::{Middleware, MiddlewareHandler};
 use crate::models::Backend;
 use crate::config::LoadBalancerConfig;
 

@@ -7,7 +7,7 @@ use crate::middleware::cache::memory_store::MemoryStore;
 use crate::middleware::cache::models::{CacheKeyOptions, CachePolicy};
 use crate::middleware::cache::redis_store::{RedisConfig, RedisStore};
 use crate::middleware::cache::CacheMiddleware;
-use crate::middleware::{Middleware, MiddlewareHandler};
+use crate::core::middleware::{Middleware, MiddlewareHandler};
 
 /// Example middleware handler for testing
 struct ExampleHandler;

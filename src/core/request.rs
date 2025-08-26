@@ -91,8 +91,9 @@ fn generate_request_id() -> String {
     let counter = COUNTER.fetch_add(1, Ordering::SeqCst);
     
     format!("{:x}-{:x}", timestamp, counter)
-}#[cfg
-(test)]
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use hyper::{Method, Uri, HeaderMap, header::HeaderValue};
